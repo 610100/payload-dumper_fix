@@ -1,8 +1,7 @@
 import io
 import os
-
 import httpx
-
+import traceback
 
 class HttpFile(io.RawIOBase):
 
@@ -21,22 +20,27 @@ class HttpFile(io.RawIOBase):
         if self.pos >= self.size:
             raise ValueError("reached EOF!")
         headers = {"Range": f"bytes={self.pos}-{end_pos}"}
-        with self.client.stream("GET", self.url, headers=headers) as r:
-            if r.status_code != 206:
-                raise io.UnsupportedOperation("Remote did not return partial content!")
-            if self.progress_reporter is not None:
-                self.progress_reporter(0, size)
-            n = 0
-            for chunk in r.iter_bytes(8192):
-                buf[n : n + len(chunk)] = chunk
-                n += len(chunk)
+        try:
+            with self.client.stream("GET", self.url, headers=headers) as r:
+                if r.status_code != 206:
+                    raise io.UnsupportedOperation("Remote did not return partial content!")
                 if self.progress_reporter is not None:
-                    self.progress_reporter(n, size)
-            if self.progress_reporter is not None:
-                self.progress_reporter(size, size)
-            self.total_bytes += n
-        self.pos += size
-        return size
+                    self.progress_reporter(0, size)
+                n = 0
+                for chunk in r.iter_bytes(8192):
+                    buf[n : n + len(chunk)] = chunk
+                    n += len(chunk)
+                    if self.progress_reporter is not None:
+                        self.progress_reporter(n, size)
+                if self.progress_reporter is not None:
+                    self.progress_reporter(size, size)
+                self.total_bytes += n
+            self.pos += size
+            return size
+        except Exception as e:
+            print(f"Failed to read from {self.url}. Error: {str(e)}")
+            traceback.print_exc()
+            return 0
 
     def readall(self) -> bytes:
         sz = self.size - self.pos
@@ -68,19 +72,23 @@ class HttpFile(io.RawIOBase):
         return self.pos
 
     def __init__(self, url: str, progress_reporter=None):
-        client = httpx.Client()
-        self.url = url
-        self.client = client
-        h = client.head(url)
-        if h.headers.get("Accept-Ranges", "none") != "bytes":
-            raise ValueError("remote does not support ranges!")
-        size = int(h.headers.get("Content-Length", 0))
-        if size == 0:
-            raise ValueError("remote has no length!")
-        self.size = size
-        self.pos = 0
-        self.total_bytes = 0
-        self.progress_reporter = progress_reporter
+        try:
+            client = httpx.Client()
+            self.url = url
+            self.client = client
+            h = client.head(url)
+            if h.headers.get("Accept-Ranges", "none") != "bytes":
+                raise ValueError("remote does not support ranges!")
+            size = int(h.headers.get("Content-Length", 0))
+            if size == 0:
+                raise ValueError("remote has no length!")
+            self.size = size
+            self.pos = 0
+            self.total_bytes = 0
+            self.progress_reporter = progress_reporter
+        except Exception as e:
+            print(f"Failed to initialize HttpFile for {url}. Error: {str(e)}")
+            traceback.print_exc()
 
     def close(self) -> None:
         self.client.close()
@@ -94,19 +102,22 @@ class HttpFile(io.RawIOBase):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-
 if __name__ == "__main__":
     import zipfile
 
-    with HttpFile(
-        "https://dl.google.com/developers/android/vic/images/ota/husky_beta-ota-ap31.240322.027-3310ca50.zip"
-    ) as f:
-        f.seek(0, os.SEEK_END)
-        print("file size:", f.tell())
-        f.seek(0, os.SEEK_SET)
-        z = zipfile.ZipFile(f)
-        print(z.namelist())
-        for name in z.namelist():
-            with z.open(name) as payload:
-                print(name, "compress type:", payload._compress_type)
-        print("total read:", f.total_bytes)
+    try:
+        with HttpFile(
+            "https://dl.google.com/developers/android/vic/images/ota/husky_beta-ota-ap31.240322.027-3310ca50.zip"
+        ) as f:
+            f.seek(0, os.SEEK_END)
+            print("file size:", f.tell())
+            f.seek(0, os.SEEK_SET)
+            z = zipfile.ZipFile(f)
+            print(z.namelist())
+            for name in z.namelist():
+                with z.open(name) as payload:
+                    print(name, "compress type:", payload._compress_type)
+            print("total read:", f.total_bytes)
+    except Exception as e:
+        print(f"Failed during main execution. Error: {str(e)}")
+        traceback.print_exc()
